@@ -14,6 +14,7 @@ import dl_quandl_EOD as dlq
 sys.path.append('../beat_market_analysis/code')
 import constituents_utils as cu
 
+
 def get_current_buylist():
     stocks = dlq.load_stocks()
 
@@ -113,11 +114,13 @@ def get_current_buylist():
     to_buy['cumulative_cost'] = to_buy['cost'].cumsum()
 
     # save for later reference
-    today_ny = datetime.datetime.now(pytz.timezone('America/New_York')).strftime('%m-%d-%Y')
-    to_buy.to_csv('to_buy_' + today_ny + '.csv')
-    rank_df.to_csv('rank_df_' + today_ny + '.csv')
-    filtered_df.to_csv('filtered_df_' + today_ny + '.csv')
+    # today_ny = datetime.datetime.now(pytz.timezone('America/New_York')).strftime('%m-%d-%Y')
+    last_date = stocks_df[t].index[-1].strftime('%m-%d-%Y')
+    to_buy.to_csv('to_buy_' + last_date + '.csv')
+    rank_df.to_csv('rank_df_' + last_date + '.csv')
+    filtered_df.to_csv('filtered_df_' + last_date + '.csv')
     print(to_buy)
+
 
 
 def portfolio_rebalance():
@@ -135,6 +138,7 @@ def portfolio_rebalance():
     latest_file = holdings_files[last_daily]
     df = pd.read_csv(latest_file)
     for t in df.index:
+        pass
         # check if price below 100 day MA
         # TODO: make function to get TAs and check things, then return small df
 
