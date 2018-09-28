@@ -115,7 +115,7 @@ def get_current_buylist():
 
     # save for later reference
     # today_ny = datetime.datetime.now(pytz.timezone('America/New_York')).strftime('%m-%d-%Y')
-    last_date = stocks_df[t].index[-1].strftime('%m-%d-%Y')
+    last_date = stocks[t].index[-1].strftime('%m-%d-%Y')
     to_buy.to_csv('to_buy_' + last_date + '.csv')
     rank_df.to_csv('rank_df_' + last_date + '.csv')
     filtered_df.to_csv('filtered_df_' + last_date + '.csv')
