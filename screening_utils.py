@@ -15,21 +15,29 @@ sys.path.append('../beat_market_analysis/code')
 import constituents_utils as cu
 
 
-def get_current_buylist():
-    stocks = dlq.load_stocks()
+def check_index_bullish(stocks, date='latest'):
+    """
+    stocks is a dictionary with tickers as keys and dataframes as values,
+    from dl_quandl_EOD
 
-    # using SP600
-    # first check if index is bullish; if price is above 200 SMA
+    date should be either 'latest', or a datestring, like '01-31-2018'
+    """
     sly = stocks['SLY']
     ijr = stocks['IJR']
     vioo = stocks['VIOO']
     sly['200d_sma'] = talib.SMA(sly['Adj_Close'].values, timeperiod=200)
     ijr['200d_sma'] = talib.SMA(ijr['Adj_Close'].values, timeperiod=200)
     vioo['200d_sma'] = talib.SMA(vioo['Adj_Close'].values, timeperiod=200)
-    # take majority vote
-    last_sly = sly.iloc[-1]
-    last_ijr = ijr.iloc[-1]
-    last_vioo = vioo.iloc[-1]
+    if date == 'latest':
+        # take majority vote
+        last_sly = sly.iloc[-1]
+        last_ijr = ijr.iloc[-1]
+        last_vioo = vioo.iloc[-1]
+    else:
+        last_sly = sly[date]
+        last_ijr = ijr[date]
+        last_vioo = vioo[date]
+
     sly_above = last_sly['Adj_Close'] > last_sly['200d_sma']
     ijr_above = last_ijr['Adj_Close'] > last_ijr['200d_sma']
     vioo_above = last_vioo['Adj_Close'] > last_vioo['200d_sma']
@@ -38,6 +46,18 @@ def get_current_buylist():
     if sum([sly_above, ijr_above, vioo_above]) > 1:
         is_bullish = True
         print('sp600 bullish')
+    else:
+        print('sp600 not bullish')
+
+    return is_bullish
+
+
+def get_current_buylist():
+    stocks = dlq.load_stocks()
+
+    # using SP600
+    # first check if index is bullish; if price is above 200 SMA
+    is_bullish = check_index_bullish(stocks)
 
     # TODO: plot the indexes with their SMAs
     rank_df = pd.DataFrame()
@@ -50,60 +70,11 @@ def get_current_buylist():
 
         # get volatility-weighted exponential fit to data to rank stocks
         for t in tqdm(tickers):
-            # calculate some metrics/signals first
-            stocks[t]['100day_SMA'] = talib.SMA(stocks[t]['Adj_Close'].values, timeperiod=100)
-            # should be above 100 day SMA to buy
-            bullish = True
-            if stocks[t].iloc[-1]['100day_SMA'] >= stocks[t].iloc[-1]['Adj_Close']:
-                # print('stock not above 100day SMA')
-                bullish = False
-
-            # check to make sure no gaps greater than 15% in last 90 days
-            # todays open minus yesterdays close
-            stocks[t]['gaps'] = (stocks[t]['Adj_Open'] - stocks[t]['Adj_Close'].shift(1)) / stocks[t]['Adj_Close'].shift(1)
-            gap = False
-            if any(abs(stocks[t]['gaps'].iloc[-90:]) > 0.15):
-                # print('recent gap greater than 15%')
-                gap = True
-
-            # get 20-day ATR
-            stocks[t]['20d_ATR'] = talib.ATR(stocks[t]['Adj_High'].values, stocks[t]['Adj_Low'].values, stocks[t]['Adj_Close'].values, timeperiod=20)
-            atr = stocks[t]['20d_ATR'].iloc[-1]
-
-            # ln of last 90 days of closes
-            ln_prices = np.log(stocks[t]['Adj_Close'].iloc[-90:].values)
-            lr = LinearRegression()
-            X = np.arange(ln_prices.shape[0]).reshape(-1, 1)
-            lr.fit(X, ln_prices)
-            # TODO: check that this shouldn't be np.exp(lr.coef_[0])
-            slope = lr.coef_[0]  # should be approximately how much in pct price changes per day
-            annualized_slope = (1 + slope) ** 250
-            r2 = lr.score(X, ln_prices)
-            rank_score = annualized_slope * r2
-
-            # TODO: plot fits
-
-            one_df = pd.DataFrame({'bullish': bullish,
-                                    'gap': gap,
-                                    'atr': atr,
-                                    'slope': annualized_slope,
-                                    'r2': r2,
-                                    'rank_score': rank_score,
-                                    'Adj_Close': stocks[t].iloc[-1]['Adj_Close']},
-                                    index=[t])
+            one_df = calc_latest_metrics(stocks, t)
             rank_df = rank_df.append(one_df)
 
     filtered_df = rank_df[(rank_df['bullish'] == True) & (rank_df['gap'] == False)].sort_values(by='rank_score', ascending=False)
-    # Shares = account_value * risk_factor / ATR
-    acct_val = 20000  # TODO: get account value from IB
-    risk_factor = 0.001  # suggested from book to be in range of 8-15 basis points, or 0.0008 - 0.0015
-    filtered_df['shares'] = acct_val * risk_factor / filtered_df['atr']
-    # round down to be conservative
-    filtered_df['rounded_shares'] = filtered_df['shares'].apply(lambda x: int(x))
-    filtered_df['cost'] = filtered_df['rounded_shares'] * filtered_df['Adj_Close']
-    filtered_df['cumulative_cost'] = filtered_df['cost'].cumsum()
-    filtered_df['weight'] = filtered_df['Adj_Close'] * filtered_df['rounded_shares'] / acct_val
-    filtered_df['cumulative_weight'] = filtered_df['weight'].cumsum()
+    filtered_df = get_cost_shares_etc(filtered_df)
 
     to_buy = filtered_df[filtered_df['cumulative_cost'] <= acct_val]
     money_left = acct_val - to_buy['cost'].sum()
@@ -121,32 +92,179 @@ def get_current_buylist():
     filtered_df.to_csv('filtered_df_' + last_date + '.csv')
     print(to_buy)
 
+    return to_buy
 
 
-def portfolio_rebalance():
+def get_cost_shares_etc(df, acct_val=20000, risk_factor=0.001):
+    """
+    calculates shares, cost, weights
+
+    risk factor suggested from book to be in range of 8-15 basis points, or 0.0008 - 0.0015
+    adjust so have 20-30 stocks suggested, no more than 50 (or 10% of index) or might start approximating index too well
+    """
+    # TODO: get account value from IB
+    # Shares = account_value * risk_factor / ATR
+    df['shares'] = acct_val * risk_factor / df['atr']
+    # round down to be conservative
+    df['rounded_shares'] = df['shares'].apply(lambda x: int(x))
+    df['cost'] = df['rounded_shares'] * df['Adj_Close']
+    df['cumulative_cost'] = filtered_df['cost'].cumsum()
+    df['weight'] = df['Adj_Close'] * df['rounded_shares'] / acct_val
+    df['cumulative_weight'] = df['weight'].cumsum()
+    return df
+
+
+def calc_latest_metrics(stocks, ticker):
+    """
+    stocks is the stock ordereddict with dataframes from dl_quandl_EOD
+    ticker is the ticker symbol (string)
+
+    """
+    # calculate some metrics/signals first
+    # stocks[ticker]['100day_SMA'] = talib.SMA(stocks[ticker]['Adj_Close'].values, timeperiod=100)
+    sma_100 = talib.SMA(stocks[ticker].iloc[-101:]['Adj_Close'].values, timeperiod=100)
+    # should be above 100 day SMA to buy
+    bullish = True
+    # if stocks[ticker].iloc[-1]['100day_SMA'] >= stocks[ticker].iloc[-1]['Adj_Close']:
+    if sma_100[-1] >= stocks[ticker].iloc[-1]['Adj_Close']:
+        # print('stock not above 100day SMA')
+        bullish = False
+
+    # check to make sure no gaps greater than 15% in last 90 days
+    # todays open minus yesterdays close
+    stocks[ticker]['gaps'] = (stocks[ticker]['Adj_Open'] - stocks[ticker]['Adj_Close'].shift(1)) / stocks[ticker]['Adj_Close'].shift(1)
+    gap = False
+    if any(abs(stocks[ticker]['gaps'].iloc[-90:]) > 0.15):
+        # print('recent gap greater than 15%')
+        gap = True
+
+    # get 20-day ATR
+    # stocks[ticker]['20d_ATR'] = talib.ATR(stocks[ticker]['Adj_High'].values, stocks[ticker]['Adj_Low'].values, stocks[ticker]['Adj_Close'].values, timeperiod=20)
+    atr_20d = talib.ATR(stocks[ticker].iloc[-21:]['Adj_High'].values, stocks[ticker].iloc[-21:]['Adj_Low'].values, stocks[ticker].iloc[-21:]['Adj_Close'].values, timeperiod=20)
+    atr = atr_20d[-1]
+
+    # ln of last 90 days of closes
+    # TODO: examine and deal with large jumps in price
+    # maybe if large jump, only take price after that, or ignore stocks with large one-off jumps
+    # which would be jumps with a few moves far outside the ATR
+    ln_prices = np.log(stocks[ticker]['Adj_Close'].iloc[-90:].values)
+    lr = LinearRegression()
+    X = np.arange(ln_prices.shape[0]).reshape(-1, 1)
+    lr.fit(X, ln_prices)
+    # TODO: check that this shouldn't be np.exp(lr.coef_[0])
+    slope = lr.coef_[0]  # should be approximately how much in pct price changes per day
+    annualized_slope = (1 + slope) ** 250
+    r2 = lr.score(X, ln_prices)
+    rank_score = annualized_slope * r2
+
+    # TODO: plot fits
+
+    one_df = pd.DataFrame({'bullish': bullish,
+                            'gap': gap,
+                            'atr': atr,
+                            'slope': annualized_slope,
+                            'r2': r2,
+                            'rank_score': rank_score,
+                            'Adj_Close': stocks[ticker].iloc[-1]['Adj_Close']},
+                            index=[ticker])
+
+    return one_df
+
+
+def calc_all_metrics(stocks, ticker):
+    """
+    stocks is dictionary with tickers as keys and dfs as values
+    ticker is a string with ticker symbol, like 'TSLA'
+
+    this calculates the metrics for the ticker and adds them to the dataframe,
+    useful for backtesting
+    """
+    pass
+
+
+
+def portfolio_rebalance(position_check=True):
     """
     to be done once a week
 
     If stock is below 100 day MA, if had a 15% or more gap, left index, if no longer in 20% of rankings, sell it
+
+    also does position resizing if position_check is True
     """
-    stocks_df = dlq.load_stocks()
+    stocks = dlq.load_stocks()
 
     # get current holdings from IB or stored list
+    # use latest stored csv for now
     holdings_files = glob.iglob('current_holdings*.csv')
-    daily_dates = [pd.to_datetime(f.split('/')[-1].split('_')[-1].split('.')[0]) for f in daily_files]
+    daily_dates = [pd.to_datetime(f.split('/')[-1].split('_')[-1].split('.')[0]) for f in holdings_files]
     last_daily = np.argmax(daily_dates)
     latest_file = holdings_files[last_daily]
     df = pd.read_csv(latest_file)
-    for t in df.index:
-        pass
-        # check if price below 100 day MA
-        # TODO: make function to get TAs and check things, then return small df
 
-    # TODO: get current holdings from IB and do portfolio rebalancing and position resizing
-    # check if still bullish (above 100 day MA)
-    # check for recent gaps (any above 15% in last 90 days)
-    # check if still in top 20% of index
-    # check if still in index
+    barchart_const = cu.load_sp600_files()
+    tickers = set([t.replace('.', '_') for t in barchart_const.index])  # quandl data has underscores instead of periods
+
+    # get index constituents
+    full_df = pd.DataFrame()
+    for t in df.index:
+        one_df = calc_latest_metrics(stocks, t)
+        full_df = full_df.append(one_df)
+
+    full_df = full_df.sort_values(by='rank_score', ascending=False)
+    top_20_pct = set(full_df.index[:120])
+
+    kickout = full_df[(full_df['bullish'] == False) | (full_df['gap'] == True) | (full_df.index not in top_20_pct.union(tickers))]
+    if kickout.shape[0] > 0:
+        print('liquidate:')
+        print(kickout)
+
+    if position_check:
+        full_df = get_cost_shares_etc(full_df)
+        full_df['current_shares'] = df[full_df.index]['rounded_shares']
+        full_df['pct_diff_shares'] = (full_df['current_shares'] - full_df['rounded_shares']) / full_df['current_shares']
+        to_rebalance = full_df[full_df['pct_diff_shares'] >= 0.05]  # book suggested 5% as threshold for resizing
+        if to_rebalance.shape[0] > 0:
+            print('rebalance:')
+            print(to_rebalance)
+
+
+def save_one_day_df(date='latest'):
+    """
+    saves current holdings file for specified date
+    """
+    if date == 'latest':
+        to_buy = get_current_buylist()
+        return to_buy
+
+    # dictionaries with Y-m-d date format as keys
+    constituent_companies, constituent_tickers, unique_dates = cu.get_historical_constituents_wrds()
+    tickers = constituent_tickers[date].values
+
+    rank_df = pd.DataFrame()
+    # get volatility-weighted exponential fit to data to rank stocks
+    for t in tqdm(tickers):
+        one_df = calc_latest_metrics(stocks, t)
+        rank_df = rank_df.append(one_df)
+
+    filtered_df = rank_df[(rank_df['bullish'] == True) & (rank_df['gap'] == False)].sort_values(by='rank_score', ascending=False)
+    filtered_df = get_cost_shares_etc(filtered_df)
+
+    to_buy = filtered_df[filtered_df['cumulative_cost'] <= acct_val]
+    money_left = acct_val - to_buy['cost'].sum()
+    next_stock = filtered_df[filtered_df['cumulative_cost'] > acct_val].iloc[0]
+    next_stock['rounded_shares'] = money_left // next_stock['Adj_Close']
+    next_stock['cost'] = next_stock['rounded_shares'] * next_stock['Adj_Close']
+    to_buy = to_buy.append(next_stock.to_frame().T)
+    to_buy['cumulative_cost'] = to_buy['cost'].cumsum()
+
+    # save for later reference
+    # today_ny = datetime.datetime.now(pytz.timezone('America/New_York')).strftime('%m-%d-%Y')
+    to_buy.to_csv('to_buy_' + date + '.csv')
+    rank_df.to_csv('rank_df_' + date + '.csv')
+    filtered_df.to_csv('filtered_df_' + date + '.csv')
+    print(to_buy)
+
+    return to_buy
 
 
 def save_first_day():
@@ -201,3 +319,9 @@ def save_first_day():
     df['weight'] = df['cost'] / acct_val
     today = today_ny = datetime.datetime.now(pytz.timezone('America/New_York')).strftime('%m-%d-%Y')
     df.to_csv('current_holdings_' + today + '.csv')
+
+
+# TODO: get current holdings from IB and do portfolio rebalancing and position resizing
+
+# date = '2018-09-24'
+# save_one_day_df(date)
