@@ -227,10 +227,13 @@ def portfolio_rebalance(position_check=True, acct_val=20000, risk_factor=0.0012)
 
 
     if position_check:
-        # to do:
-        full_df = get_cost_shares_etc(full_df)
+        # TODO: don't rebalance things if going up steadily -- need to quantify
+        full_df = get_cost_shares_etc(full_df, acct_val=acct_val, risk_factor=risk_factor)
         full_df['current_shares'] = df.loc[full_df.index]['rounded_shares']
         full_df['pct_diff_shares'] = (full_df['rounded_shares'] - full_df['current_shares']) / full_df['current_shares']
+        end_cols = ['current_shares', 'rounded_shares', 'pct_diff_shares']
+        full_df = full_df[[c for c in full_df.columns if c not in end_cols] + end_cols]
+        full_df['cost_diff'] = full_df['Adj_Close'] * (full_df['current_shares'] - full_df['rounded_shares'])
         to_rebalance = full_df[full_df['pct_diff_shares'].abs() >= 0.1]  # book suggested 5% as threshold for resizing, use 10% for less transaction cost
         if to_rebalance.shape[0] > 0:
             print('rebalance:')
