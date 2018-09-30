@@ -52,7 +52,7 @@ def check_index_bullish(stocks, date='latest'):
     return is_bullish
 
 
-def get_current_buylist():
+def get_current_buylist(acct_val=20000, risk_factor=0.0012):
     stocks = dlq.load_stocks()
 
     # using SP600
@@ -74,9 +74,9 @@ def get_current_buylist():
             rank_df = rank_df.append(one_df)
 
     filtered_df = rank_df[(rank_df['bullish'] == True) & (rank_df['gap'] == False)].sort_values(by='rank_score', ascending=False)
-    filtered_df = get_cost_shares_etc(filtered_df)
+    filtered_df = get_cost_shares_etc(filtered_df, acct_val=acct_val, risk_factor=risk_factor)
 
-    to_buy = filtered_df[filtered_df['cumulative_cost'] <= acct_val]
+    to_buy = filtered_df[filtered_df['cumulative_cost'] <= (acct_val - 100)]  # save $100 for commissions
     money_left = acct_val - to_buy['cost'].sum()
     next_stock = filtered_df[filtered_df['cumulative_cost'] > acct_val].iloc[0]
     next_stock['rounded_shares'] = money_left // next_stock['Adj_Close']
@@ -95,12 +95,14 @@ def get_current_buylist():
     return to_buy
 
 
-def get_cost_shares_etc(df, acct_val=20000, risk_factor=0.001):
+def get_cost_shares_etc(df, acct_val=20000, risk_factor=0.0012):
     """
     calculates shares, cost, weights
 
     risk factor suggested from book to be in range of 8-15 basis points, or 0.0008 - 0.0015
     adjust so have 20-30 stocks suggested, no more than 50 (or 10% of index) or might start approximating index too well
+
+    for sp600, 0.001 seemed to give about 35 stocks, not too bad
     """
     # TODO: get account value from IB
     # Shares = account_value * risk_factor / ATR
@@ -122,7 +124,7 @@ def calc_latest_metrics(df, ticker):
     """
     # calculate some metrics/signals first
     # stocks[ticker]['100day_SMA'] = talib.SMA(stocks[ticker]['Adj_Close'].values, timeperiod=100)
-    sma_100 = talib.SMA(df.iloc[-101:]['Adj_Close'].values, timeperiod=100)
+    sma_100 = talib.SMA(df.iloc[-300:]['Adj_Close'].values, timeperiod=100)
     # should be above 100 day SMA to buy
     bullish = True
     # if stocks[ticker].iloc[-1]['100day_SMA'] >= stocks[ticker].iloc[-1]['Adj_Close']:
@@ -140,7 +142,8 @@ def calc_latest_metrics(df, ticker):
 
     # get 20-day ATR
     # stocks[ticker]['20d_ATR'] = talib.ATR(stocks[ticker]['Adj_High'].values, stocks[ticker]['Adj_Low'].values, stocks[ticker]['Adj_Close'].values, timeperiod=20)
-    atr_20d = talib.ATR(df.iloc[-21:]['Adj_High'].values, df.iloc[-21:]['Adj_Low'].values, df.iloc[-21:]['Adj_Close'].values, timeperiod=20)
+    # because ATR depends on previous values, best to use all possible values
+    atr_20d = talib.ATR(df['Adj_High'].values, df['Adj_Low'].values, df['Adj_Close'].values, timeperiod=20)
     atr = atr_20d[-1]
 
     # ln of last 90 days of closes
@@ -183,7 +186,7 @@ def calc_all_metrics(stocks, ticker):
 
 
 
-def portfolio_rebalance(position_check=True):
+def portfolio_rebalance(position_check=True, acct_val=20000, risk_factor=0.0012):
     """
     to be done once a week
 
@@ -217,33 +220,41 @@ def portfolio_rebalance(position_check=True):
     if kickout.shape[0] > 0:
         print('liquidate:')
         print(kickout)
+        # calculate money available for new purchases
+
+        # get new purchases and save current_holdings file
+
+
 
     if position_check:
+        # to do:
         full_df = get_cost_shares_etc(full_df)
         full_df['current_shares'] = df.loc[full_df.index]['rounded_shares']
-        full_df['pct_diff_shares'] = (full_df['current_shares'] - full_df['rounded_shares']) / full_df['current_shares']
-        to_rebalance = full_df[full_df['pct_diff_shares'] >= 0.05]  # book suggested 5% as threshold for resizing
+        full_df['pct_diff_shares'] = (full_df['rounded_shares'] - full_df['current_shares']) / full_df['current_shares']
+        to_rebalance = full_df[full_df['pct_diff_shares'].abs() >= 0.1]  # book suggested 5% as threshold for resizing, use 10% for less transaction cost
         if to_rebalance.shape[0] > 0:
             print('rebalance:')
             print(to_rebalance)
 
 
-def save_one_day_df(stocks, date='latest', write_holdings_file=False):
+def save_one_day_df(stocks, date='latest', write_holdings_file=False, acct_val=20000, risk_factor=0.0012, reserve_for_commisions=100):
     """
     saves current holdings file for specified date
+
+    stocks is a dictionary of stocks dataframes from EOD quandl data
+
+    date should be a string with 'Y-m-d' like  '2018-09-24'
     """
     if date == 'latest':
         to_buy = get_current_buylist()
         return to_buy
-
-    acct_val = 20000
 
     # dictionaries with Y-m-d date format as keys
     # gets tickers from WRDS
     # constituent_companies, constituent_tickers, unique_dates = cu.get_historical_constituents_wrds()
     # tickers = constituent_tickers[date].values
     # tickers = [t.replace('.', '_') for t in tickers]  # quandl data has underscores instead of periods
-    barchart_const = cu.load_sp600_files()
+    barchart_const = cu.load_sp600_files(date=date)
     tickers = [t.replace('.', '_') for t in barchart_const.index]  # quandl data has underscores instead of periods
 
     rank_df = pd.DataFrame()
@@ -257,9 +268,9 @@ def save_one_day_df(stocks, date='latest', write_holdings_file=False):
         rank_df = rank_df.append(one_df)
 
     filtered_df = rank_df[(rank_df['bullish'] == True) & (rank_df['gap'] == False)].sort_values(by='rank_score', ascending=False)
-    filtered_df = get_cost_shares_etc(filtered_df, acct_val=acct_val)
+    filtered_df = get_cost_shares_etc(filtered_df, acct_val=acct_val, risk_factor=risk_factor)
 
-    to_buy = filtered_df[filtered_df['cumulative_cost'] <= acct_val]
+    to_buy = filtered_df[filtered_df['cumulative_cost'] <= (acct_val - reserve_for_commisions)]  # save $100 for commisions
     money_left = acct_val - to_buy['cost'].sum()
     next_stock = filtered_df[filtered_df['cumulative_cost'] > acct_val].iloc[0]
     next_stock['rounded_shares'] = money_left // next_stock['Adj_Close']
@@ -337,6 +348,7 @@ def save_first_day():
 
 # TODO: get current holdings from IB and do portfolio rebalancing and position resizing
 
-# date = '2018-09-24'
+# date = '2018-09-21'
 # stocks = dlq.load_stocks()
 # save_one_day_df(stocks, date)
+# to_buy = save_one_day_df(stocks, date='2018-09-21', write_holdings_file=True, risk_factor=0.001, reserve_for_commisions=0)
