@@ -228,6 +228,7 @@ def portfolio_rebalance(position_check=True, acct_val=20000, risk_factor=0.0012)
 
     if position_check:
         # TODO: don't rebalance things if going up steadily -- need to quantify
+        # 
         full_df = get_cost_shares_etc(full_df, acct_val=acct_val, risk_factor=risk_factor)
         full_df['current_shares'] = df.loc[full_df.index]['rounded_shares']
         full_df['pct_diff_shares'] = (full_df['rounded_shares'] - full_df['current_shares']) / full_df['current_shares']
