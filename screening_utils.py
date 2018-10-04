@@ -219,6 +219,7 @@ def portfolio_rebalance(position_check=True, acct_val=20000, risk_factor=0.0012)
     if kickout.shape[0] > 0:
         print('liquidate:')
         print(kickout)
+        print('\n')
         # calculate money available for new purchases
         # TODO: get available cash from IB
         prices = pd.Series([stocks[t]['Adj_Close'][-1] for t in kickout.index], index=kickout.index)
@@ -234,7 +235,7 @@ def portfolio_rebalance(position_check=True, acct_val=20000, risk_factor=0.0012)
         end_cols = ['current_shares', 'rounded_shares', 'pct_diff_shares']
         full_df = full_df[[c for c in full_df.columns if c not in end_cols] + end_cols]
         full_df['cost_diff'] = full_df['Adj_Close'] * (full_df['current_shares'] - full_df['rounded_shares'])
-        to_rebalance = full_df[full_df['pct_diff_shares'].abs() >= 0.1]  # book suggested 5% as threshold for resizing, use 10% for less transaction cost
+        to_rebalance = full_df.loc[full_df['pct_diff_shares'].abs() >= 0.1]  # book suggested 5% as threshold for resizing, use 10% for less transaction cost
         # also ignore any kickout stocks
         to_rebalance = to_rebalance.loc[[i for i in to_rebalance.index if i not in kickout.index]]
         if to_rebalance.shape[0] > 0:
@@ -243,15 +244,28 @@ def portfolio_rebalance(position_check=True, acct_val=20000, risk_factor=0.0012)
 
         # first get rebalance sells, and find out how much available -- add to available from kickout
         # then
-        neg_rebal = to_rebalance[to_rebalance['pct_diff_shares'] < 0]
+        neg_rebal = to_rebalance.loc[to_rebalance['pct_diff_shares'] < 0]
         neg_rebal_prices = pd.Series([stocks[t]['Adj_Close'][-1] for t in neg_rebal.index], index=neg_rebal.index)
         rebal_money_available = sum((neg_rebal['current_shares'] - neg_rebal['rounded_shares']) * neg_rebal_prices)
-        pos_rebal = to_rebalance[to_rebalance['pct_diff_shares'] > 0]
+        pos_rebal = to_rebalance.loc[to_rebalance['pct_diff_shares'] > 0]
+        money_available += rebal_money_available
 
-    money_available += rebal_money_available
+
+        # TODO: check if market bullish -- if not, can't add any more shares or buy new
+        # add to current holdings until no more money available
+        pos_rebal_prices = pd.Series([stocks[t]['Adj_Close'][-1] for t in pos_rebal.index], index=pos_rebal.index)
+        pos_rebal.sort_values(by='rank_score', inplace=True, ascending=False)
+        pos_rebal.loc[:, 'add_shares'] = pos_rebal['rounded_shares'] - pos_rebal['current_shares']
+        pos_rebal.loc[:, 'cumulative_cost'] = pos_rebal['add_shares'] * pos_rebal_prices
+        if pos_robal['cumulative_cost'].sum() < money_available:
+            print('add to holdings: ')
+            print(pos_rebal[['add_shares']])
+            # TODO: get next best stocks to add to portfolio
+        else:
+            can_buy = pos_rebal[pos_rebal['cumulative_cost'] <= money_available]
+
 
     # get new purchases and save current_holdings file
-
 
 
 def save_one_day_df(stocks, date='latest', write_holdings_file=False, acct_val=20000, risk_factor=0.0012, reserve_for_commisions=100):
