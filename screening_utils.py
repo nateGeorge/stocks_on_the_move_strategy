@@ -6,13 +6,18 @@ import talib
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score
 
 sys.path.append('../stock_prediction/code')
 import dl_quandl_EOD as dlq
 
 sys.path.append('../beat_market_analysis/code')
 import constituents_utils as cu
+
+# lowered gap to 0.1 from 0.15 suggested in book based on looking at JBT 10-4-2018
+gap_threshold = 0.1
 
 
 def check_index_bullish(stocks, date='latest'):
@@ -136,7 +141,7 @@ def calc_latest_metrics(df, ticker):
     # todays open minus yesterdays close
     gaps = (df['Adj_Open'] - df['Adj_Close'].shift(1)) / df['Adj_Close'].shift(1)
     gap = False
-    if any(abs(gaps[-90:]) > 0.15):
+    if any(abs(gaps[-90:]) > gap_threshold):
         # print('recent gap greater than 15%')
         gap = True
 
@@ -150,17 +155,7 @@ def calc_latest_metrics(df, ticker):
     # TODO: examine and deal with large jumps in price
     # maybe if large jump, only take price after that, or ignore stocks with large one-off jumps
     # which would be jumps with a few moves far outside the ATR
-    ln_prices = np.log(df['Adj_Close'].iloc[-90:].values)
-    lr = LinearRegression()
-    X = np.arange(ln_prices.shape[0]).reshape(-1, 1)
-    lr.fit(X, ln_prices)
-    # TODO: check that this shouldn't be np.exp(lr.coef_[0])
-    slope = lr.coef_[0]  # should be approximately how much in pct price changes per day
-    annualized_slope = (1 + slope) ** 250
-    r2 = lr.score(X, ln_prices)
-    rank_score = annualized_slope * r2
-
-    # TODO: plot fits
+    annualized_slope, r2, rank_score = fit_exponential_curve(df)
 
     one_df = pd.DataFrame({'bullish': bullish,
                             'gap': gap,
@@ -185,6 +180,14 @@ def calc_all_metrics(stocks, ticker):
     pass
 
 
+def get_latest_holding_file():
+    holdings_files = glob.glob('current_holdings_*.csv')
+    daily_dates = [pd.to_datetime(f.split('/')[-1].split('_')[-1].split('.')[0]) for f in holdings_files]
+    last_daily = np.argmax(daily_dates)
+    latest_file = holdings_files[last_daily]
+    df = pd.read_csv(latest_file, index_col=0)
+    return df
+
 
 def portfolio_rebalance(position_check=True, acct_val=20000, risk_factor=0.0012):
     """
@@ -198,18 +201,14 @@ def portfolio_rebalance(position_check=True, acct_val=20000, risk_factor=0.0012)
 
     # get current holdings from IB or stored list
     # use latest stored csv for now
-    holdings_files = glob.glob('current_holdings_*.csv')
-    daily_dates = [pd.to_datetime(f.split('/')[-1].split('_')[-1].split('.')[0]) for f in holdings_files]
-    last_daily = np.argmax(daily_dates)
-    latest_file = holdings_files[last_daily]
-    df = pd.read_csv(latest_file, index_col=0)
+    holdings_df = get_latest_holding_file()
 
+    # get index constituents
     barchart_const = cu.load_sp600_files()
     tickers = set([t.replace('.', '_') for t in barchart_const.index])  # quandl data has underscores instead of periods
 
-    # get index constituents
     full_df = pd.DataFrame()
-    for t in df.index:
+    for t in holdings_df.index:
         one_df = calc_latest_metrics(stocks[t], t)
         full_df = full_df.append(one_df)
 
@@ -221,24 +220,38 @@ def portfolio_rebalance(position_check=True, acct_val=20000, risk_factor=0.0012)
         print('liquidate:')
         print(kickout)
         # calculate money available for new purchases
+        # TODO: get available cash from IB
+        prices = pd.Series([stocks[t]['Adj_Close'][-1] for t in kickout.index], index=kickout.index)
+        money_available = sum(holdings_df.loc[kickout.index]['rounded_shares'] * prices)
 
-        # get new purchases and save current_holdings file
-
-
-
+    rebal_money_available = 0
     if position_check:
-        # TODO: don't rebalance things if going up steadily -- need to quantify
-        # 
+        # TODO: don't rebalance (sell) things if going up steadily -- need to quantify
+        #
         full_df = get_cost_shares_etc(full_df, acct_val=acct_val, risk_factor=risk_factor)
-        full_df['current_shares'] = df.loc[full_df.index]['rounded_shares']
+        full_df['current_shares'] = holdings_df.loc[full_df.index]['rounded_shares']
         full_df['pct_diff_shares'] = (full_df['rounded_shares'] - full_df['current_shares']) / full_df['current_shares']
         end_cols = ['current_shares', 'rounded_shares', 'pct_diff_shares']
         full_df = full_df[[c for c in full_df.columns if c not in end_cols] + end_cols]
         full_df['cost_diff'] = full_df['Adj_Close'] * (full_df['current_shares'] - full_df['rounded_shares'])
         to_rebalance = full_df[full_df['pct_diff_shares'].abs() >= 0.1]  # book suggested 5% as threshold for resizing, use 10% for less transaction cost
+        # also ignore any kickout stocks
+        to_rebalance = to_rebalance.loc[[i for i in to_rebalance.index if i not in kickout.index]]
         if to_rebalance.shape[0] > 0:
             print('rebalance:')
             print(to_rebalance)
+
+        # first get rebalance sells, and find out how much available -- add to available from kickout
+        # then
+        neg_rebal = to_rebalance[to_rebalance['pct_diff_shares'] < 0]
+        neg_rebal_prices = pd.Series([stocks[t]['Adj_Close'][-1] for t in neg_rebal.index], index=neg_rebal.index)
+        rebal_money_available = sum((neg_rebal['current_shares'] - neg_rebal['rounded_shares']) * neg_rebal_prices)
+        pos_rebal = to_rebalance[to_rebalance['pct_diff_shares'] > 0]
+
+    money_available += rebal_money_available
+
+    # get new purchases and save current_holdings file
+
 
 
 def save_one_day_df(stocks, date='latest', write_holdings_file=False, acct_val=20000, risk_factor=0.0012, reserve_for_commisions=100):
@@ -348,6 +361,51 @@ def save_first_day():
     df['weight'] = df['cost'] / acct_val
     today = today_ny = datetime.datetime.now(pytz.timezone('America/New_York')).strftime('%m-%d-%Y')
     df.to_csv('current_holdings_' + today + '.csv')
+
+
+def fit_exponential_curve(df, plot_fit=False):
+    """
+    fits exponential curve to data
+
+    df should be a dataframe from the 'stocks' dictionary of dataframes
+    """
+    # df = stocks['JBT']
+    prices = df['Adj_Close'].iloc[-90:].values
+    ln_prices = np.log(prices)
+    X = np.arange(ln_prices.shape[0])#.reshape(-1, 1)  # reshape only needed for sklearn
+    # the problem with a regular linear regression is the fit is biased towards smaller values,
+    # which will be the older values
+    # instead, we want to weight the points by their value
+    # https://stackoverflow.com/a/3433503/4549682
+    # http://mathworld.wolfram.com/LeastSquaresFittingExponential.html
+    coefs = np.polyfit(X, ln_prices, 1, w=ln_prices)
+    slope = np.exp(coefs[0])
+    # equation: y = Ae^Bx
+    preds = np.exp(coefs[1]) * np.exp(coefs[0] * X)
+    # old way of doing it:
+    # lr = LinearRegression()
+    # lr.fit(X, ln_prices)
+    # slope = lr.coef_[0]  # should be approximately how much in pct price changes per day
+    # preds = lr.predict(X)
+
+    annualized_slope = (slope) ** 250
+    # r2 = lr.score(X, ln_prices)  # old way for sklearn model
+    r2 = r2_score(prices, preds)
+    rank_score = annualized_slope * r2
+
+    if plot_fit:
+        # note: this would need to be changed for sklearn fits
+        # plot fit with ln(prices)
+        plt.scatter(X, ln_prices)
+        plt.plot(X, np.log(preds))
+        plt.show()
+
+        # plot fit with normal prices
+        plt.scatter(X, np.exp(ln_prices))
+        plt.plot(X, preds)
+        plt.show()
+
+    return annualized_slope, r2, rank_score
 
 
 # TODO: get current holdings from IB and do portfolio rebalancing and position resizing
