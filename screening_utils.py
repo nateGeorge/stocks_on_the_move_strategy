@@ -16,9 +16,6 @@ import dl_quandl_EOD as dlq
 sys.path.append('../beat_market_analysis/code')
 import constituents_utils as cu
 
-# lowered gap to 0.1 from 0.15 suggested in book based on looking at JBT 10-4-2018
-gap_threshold = 0.1
-
 
 def check_index_bullish(stocks, date='latest'):
     """
@@ -121,11 +118,12 @@ def get_cost_shares_etc(df, acct_val=20000, risk_factor=0.0012):
     return df
 
 
-def calc_latest_metrics(df, ticker):
+def calc_latest_metrics(df, ticker, gap_threshold=0.1):
     """
     df is the stock dataframe
     ticker is the ticker symbol (string)
 
+    lowered gap to 0.1 from 0.15 suggested in book based on looking at JBT 10-4-2018?
     """
     # calculate some metrics/signals first
     # stocks[ticker]['100day_SMA'] = talib.SMA(stocks[ticker]['Adj_Close'].values, timeperiod=100)
@@ -189,7 +187,7 @@ def get_latest_holding_file():
     return df
 
 
-def portfolio_rebalance(position_check=True, acct_val=20000, risk_factor=0.0012):
+def portfolio_rebalance(position_check=True, acct_val=20000, risk_factor=0.001):
     """
     to be done once a week
 
@@ -209,7 +207,7 @@ def portfolio_rebalance(position_check=True, acct_val=20000, risk_factor=0.0012)
 
     full_df = pd.DataFrame()
     for t in holdings_df.index:
-        one_df = calc_latest_metrics(stocks[t], t)
+        one_df = calc_latest_metrics(stocks[t], t, gap_threshold=0.15)
         full_df = full_df.append(one_df)
 
     full_df = full_df.sort_values(by='rank_score', ascending=False)
@@ -229,41 +227,48 @@ def portfolio_rebalance(position_check=True, acct_val=20000, risk_factor=0.0012)
     if position_check:
         # TODO: don't rebalance (sell) things if going up steadily -- need to quantify
         #
-        full_df = get_cost_shares_etc(full_df, acct_val=acct_val, risk_factor=risk_factor)
+        full_df = get_cost_shares_etc(full_df, acct_val=acct_val, risk_factor=risk_factor).copy()
         full_df['current_shares'] = holdings_df.loc[full_df.index]['rounded_shares']
         full_df['pct_diff_shares'] = (full_df['rounded_shares'] - full_df['current_shares']) / full_df['current_shares']
         end_cols = ['current_shares', 'rounded_shares', 'pct_diff_shares']
         full_df = full_df[[c for c in full_df.columns if c not in end_cols] + end_cols]
         full_df['cost_diff'] = full_df['Adj_Close'] * (full_df['current_shares'] - full_df['rounded_shares'])
-        to_rebalance = full_df.loc[full_df['pct_diff_shares'].abs() >= 0.1]  # book suggested 5% as threshold for resizing, use 10% for less transaction cost
+        to_rebalance = full_df.loc[full_df['pct_diff_shares'].abs() >= 0.1].copy()  # book suggested 5% as threshold for resizing, use 10% for less transaction cost
         # also ignore any kickout stocks
-        to_rebalance = to_rebalance.loc[[i for i in to_rebalance.index if i not in kickout.index]]
+        to_rebalance = to_rebalance.loc[[i for i in to_rebalance.index if i not in kickout.index]].copy()
         if to_rebalance.shape[0] > 0:
-            print('rebalance:')
-            print(to_rebalance)
+            pass
+            # print('rebalance:')
+            # print(to_rebalance)
+        else:
+            break
+
 
         # first get rebalance sells, and find out how much available -- add to available from kickout
-        # then
-        neg_rebal = to_rebalance.loc[to_rebalance['pct_diff_shares'] < 0]
+        neg_rebal = to_rebalance.loc[to_rebalance['pct_diff_shares'] < 0].copy()  # copy is important to use here to avoid settingwithcopy warning
+        neg_rebal.loc[:, 'sell_shares'] = neg_rebal['current_shares'] - neg_rebal['rounded_shares']
+        print('share shares:')
+        print(neg_rebal['sell_shares'])
         neg_rebal_prices = pd.Series([stocks[t]['Adj_Close'][-1] for t in neg_rebal.index], index=neg_rebal.index)
         rebal_money_available = sum((neg_rebal['current_shares'] - neg_rebal['rounded_shares']) * neg_rebal_prices)
-        pos_rebal = to_rebalance.loc[to_rebalance['pct_diff_shares'] > 0]
         money_available += rebal_money_available
 
 
         # TODO: check if market bullish -- if not, can't add any more shares or buy new
         # add to current holdings until no more money available
+        pos_rebal = to_rebalance.loc[to_rebalance['pct_diff_shares'] > 0].copy()
         pos_rebal_prices = pd.Series([stocks[t]['Adj_Close'][-1] for t in pos_rebal.index], index=pos_rebal.index)
         pos_rebal.sort_values(by='rank_score', inplace=True, ascending=False)
         pos_rebal.loc[:, 'add_shares'] = pos_rebal['rounded_shares'] - pos_rebal['current_shares']
         pos_rebal.loc[:, 'cumulative_cost'] = pos_rebal['add_shares'] * pos_rebal_prices
-        if pos_robal['cumulative_cost'].sum() < money_available:
+        if pos_rebal['cumulative_cost'].sum() < money_available:
             print('add to holdings: ')
             print(pos_rebal[['add_shares']])
             # TODO: get next best stocks to add to portfolio
         else:
             can_buy = pos_rebal[pos_rebal['cumulative_cost'] <= money_available]
-
+            print('add all possible rebalances to holdings:')
+            print(can_buy)
 
     # get new purchases and save current_holdings file
 
