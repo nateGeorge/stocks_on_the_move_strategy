@@ -237,38 +237,31 @@ def portfolio_rebalance(position_check=True, acct_val=20000, risk_factor=0.001):
         # also ignore any kickout stocks
         to_rebalance = to_rebalance.loc[[i for i in to_rebalance.index if i not in kickout.index]].copy()
         if to_rebalance.shape[0] > 0:
-            pass
-            # print('rebalance:')
-            # print(to_rebalance)
-        else:
-            break
+            # first get rebalance sells, and find out how much available -- add to available from kickout
+            neg_rebal = to_rebalance.loc[to_rebalance['pct_diff_shares'] < 0].copy()  # copy is important to use here to avoid settingwithcopy warning
+            neg_rebal.loc[:, 'sell_shares'] = neg_rebal['current_shares'] - neg_rebal['rounded_shares']
+            print('share shares:')
+            print(neg_rebal['sell_shares'])
+            neg_rebal_prices = pd.Series([stocks[t]['Adj_Close'][-1] for t in neg_rebal.index], index=neg_rebal.index)
+            rebal_money_available = sum((neg_rebal['current_shares'] - neg_rebal['rounded_shares']) * neg_rebal_prices)
+            money_available += rebal_money_available
 
 
-        # first get rebalance sells, and find out how much available -- add to available from kickout
-        neg_rebal = to_rebalance.loc[to_rebalance['pct_diff_shares'] < 0].copy()  # copy is important to use here to avoid settingwithcopy warning
-        neg_rebal.loc[:, 'sell_shares'] = neg_rebal['current_shares'] - neg_rebal['rounded_shares']
-        print('share shares:')
-        print(neg_rebal['sell_shares'])
-        neg_rebal_prices = pd.Series([stocks[t]['Adj_Close'][-1] for t in neg_rebal.index], index=neg_rebal.index)
-        rebal_money_available = sum((neg_rebal['current_shares'] - neg_rebal['rounded_shares']) * neg_rebal_prices)
-        money_available += rebal_money_available
-
-
-        # TODO: check if market bullish -- if not, can't add any more shares or buy new
-        # add to current holdings until no more money available
-        pos_rebal = to_rebalance.loc[to_rebalance['pct_diff_shares'] > 0].copy()
-        pos_rebal_prices = pd.Series([stocks[t]['Adj_Close'][-1] for t in pos_rebal.index], index=pos_rebal.index)
-        pos_rebal.sort_values(by='rank_score', inplace=True, ascending=False)
-        pos_rebal.loc[:, 'add_shares'] = pos_rebal['rounded_shares'] - pos_rebal['current_shares']
-        pos_rebal.loc[:, 'cumulative_cost'] = pos_rebal['add_shares'] * pos_rebal_prices
-        if pos_rebal['cumulative_cost'].sum() < money_available:
-            print('add to holdings: ')
-            print(pos_rebal[['add_shares']])
-            # TODO: get next best stocks to add to portfolio
-        else:
-            can_buy = pos_rebal[pos_rebal['cumulative_cost'] <= money_available]
-            print('add all possible rebalances to holdings:')
-            print(can_buy)
+            # TODO: check if market bullish -- if not, can't add any more shares or buy new
+            # add to current holdings until no more money available
+            pos_rebal = to_rebalance.loc[to_rebalance['pct_diff_shares'] > 0].copy()
+            pos_rebal_prices = pd.Series([stocks[t]['Adj_Close'][-1] for t in pos_rebal.index], index=pos_rebal.index)
+            pos_rebal.sort_values(by='rank_score', inplace=True, ascending=False)
+            pos_rebal.loc[:, 'add_shares'] = pos_rebal['rounded_shares'] - pos_rebal['current_shares']
+            pos_rebal.loc[:, 'cumulative_cost'] = pos_rebal['add_shares'] * pos_rebal_prices
+            if pos_rebal['cumulative_cost'].sum() < money_available:
+                print('add to holdings: ')
+                print(pos_rebal[['add_shares']])
+                # TODO: get next best stocks to add to portfolio
+            else:
+                can_buy = pos_rebal[pos_rebal['cumulative_cost'] <= money_available]
+                print('add all possible rebalances to holdings:')
+                print(can_buy)
 
     # get new purchases and save current_holdings file
 
